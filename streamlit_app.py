@@ -11,9 +11,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 # ---------- Versão ----------
-
-VERSION = "v1.1.2 (2025-11-03)"
-
+VERSION = "v1.1.3 (2025-11-03)"
 
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
@@ -96,9 +94,17 @@ def inject_css():
 
 # ---------- AI calls ----------
 def validate_user_idea(idea: str, prompts: dict) -> dict:
-    """Guardrails via LLM -> retorna decisão JSON. SANITIZE/IGNORE => não personaliza."""
+    """Guardrails via LLM -> retorna decisão JSON.
+
+    Estrutura esperada:
+    {"decision": "USE_AS_IS"|"SANITIZE"|"IGNORE", "notes": str, "sanitized_idea": str}
+    """
     if not idea.strip():
-        return {"decision": "USE_AS_IS", "notes": "Sem personalização informada."}
+        return {
+            "decision": "USE_AS_IS",
+            "notes": "Sem personalização informada.",
+            "sanitized_idea": "",
+        }
     model = genai.GenerativeModel(
         model_name="gemini-2.0-flash",
         system_instruction=prompts["guardrails"]
@@ -110,9 +116,18 @@ def validate_user_idea(idea: str, prompts: dict) -> dict:
         decision = str(data.get("decision", "")).upper().strip()
         if decision not in {"USE_AS_IS", "SANITIZE", "IGNORE"}:
             decision = "IGNORE"
-        return {"decision": decision, "notes": data.get("notes", "")}
+        sanitized = str(data.get("sanitized_idea", "") or "").strip()
+        return {
+            "decision": decision,
+            "notes": data.get("notes", ""),
+            "sanitized_idea": sanitized,
+        }
     except Exception:
-        return {"decision": "IGNORE", "notes": "Resposta do guardrails não parseável."}
+        return {
+            "decision": "IGNORE",
+            "notes": "Resposta do guardrails não parseável.",
+            "sanitized_idea": "",
+        }
 
 def build_user_prompt(idea: str, tone: str, duration: str) -> str:
     target = {"~2 min": 320, "~4 min": 460, "~6 min": 700}.get(duration, 460)
@@ -283,9 +298,28 @@ def main():
             _maybe_stop()
             guard = validate_user_idea(idea_value, prompts)
             _maybe_stop()
-            effective_idea = "" if guard["decision"] != "USE_AS_IS" else idea_value
-            if guard["decision"] != "USE_AS_IS":
-                st.toast("Ideia personalizada não pôde ser usada; gerando história segura automaticamente.", icon="ℹ️")
+            decision = guard.get("decision", "IGNORE")
+            effective_idea = idea_value
+            if decision == "IGNORE":
+                effective_idea = ""
+                st.toast(
+                    "Ideia personalizada não pôde ser usada; gerando história segura automaticamente.",
+                    icon="ℹ️",
+                )
+            elif decision == "SANITIZE":
+                sanitized = guard.get("sanitized_idea", "").strip()
+                if sanitized:
+                    effective_idea = sanitized
+                    st.toast(
+                        "Ideia personalizada foi ajustada para ficar segura.",
+                        icon="ℹ️",
+                    )
+                else:
+                    effective_idea = ""
+                    st.toast(
+                        "Ideia personalizada não pôde ser usada; gerando história segura automaticamente.",
+                        icon="ℹ️",
+                    )
 
             user_prompt = build_user_prompt(effective_idea, tone_value, duration_value)
             story_raw = generate_story(user_prompt, prompts)
@@ -324,7 +358,7 @@ def main():
 
         st.session_state["busy"] = False
         st.toast("Concluído", icon="✅")
-        st.experimental_rerun()
+        st.rerun()
 
     story_data = st.session_state.get("generated_story")
     if story_data:
