@@ -1,0 +1,7 @@
+Gere um prompt curto EM INGLÊS para ilustração infantil baseado no texto abaixo.
+Requisitos:
+- Descreva o MOMENTO mais emblemático (personagem, cenário, emoção positiva).
+- Estilo: “a cute, happy children's book illustration, soft lighting, digital watercolor, simple shapes”.
+- Adicione ao final: “no text, no letters, no words”.
+- Não repita a história inteira; máximo 45 palavras.
+Retorne apenas o prompt final.
