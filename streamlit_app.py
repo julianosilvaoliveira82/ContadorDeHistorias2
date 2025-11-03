@@ -7,6 +7,9 @@ import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 
+# ---------- Versão ----------
+VERSION = "v1.1.0 (2025-11-03)"
+
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
 
@@ -120,14 +123,13 @@ def summarize_for_image_prompt(story_text: str, prompts: dict) -> str:
 
 def generate_story_image(img_prompt_en: str) -> bytes:
     """
-    Gera PNG usando o modelo de imagem solicitado: 'models/gemini-2.5-flash-image'.
+    Gera PNG usando o modelo de imagem: 'models/gemini-2.5-flash-image'.
     """
     image_model = genai.GenerativeModel("models/gemini-2.5-flash-image")
     resp = image_model.generate_content(
         img_prompt_en,
         generation_config={"response_mime_type": "image/png"}
     )
-    # Extrai bytes da resposta
     if hasattr(resp, "binary") and resp.binary:
         return resp.binary
     for p in getattr(resp, "parts", []):
@@ -150,6 +152,7 @@ def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="📖", layout="centered")
     inject_css()
     st.markdown(f"<h1 style='text-align:center'>{APP_TITLE}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<div class='muted' style='text-align:center;margin-top:-6px;'>Versão {VERSION}</div>", unsafe_allow_html=True)
 
     # Estado
     if "busy" not in st.session_state: st.session_state["busy"] = False
@@ -257,7 +260,7 @@ def main():
         st.session_state["busy"] = False
         st.toast("Concluído", icon="✅")
 
-    # --- Rodapé “pague um café” ---
+    # --- Rodapé “pague um café” + versão ---
     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
     with st.container():
         st.markdown(f"""
@@ -266,6 +269,7 @@ def main():
             <b>Curtiu o app?</b> Se este projeto te ajudou, considere pagar um café ☕.<br/>
             <span class='muted'>PIX (chave e-mail):</span><br/>
             <code>juliano.silva.oliveira@gmai.com</code>
+            <div class='muted' style='margin-top:8px'>Versão {VERSION}</div>
           </div>
         </div>
         """, unsafe_allow_html=True)
