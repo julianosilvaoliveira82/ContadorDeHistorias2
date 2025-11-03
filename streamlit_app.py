@@ -6,17 +6,22 @@ import re
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 import google.generativeai as genai
 
 # ---------- Versão ----------
-VERSION = "v1.1.1 (2025-11-03)"
+
+VERSION = "v1.1.2 (2025-11-03)"
+
 
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
 
 DEFAULT_TONE = "Aleatório"   # [Aleatório, Aventura, Engraçada, Calma, Misteriosa]
 DEFAULT_DURATION = "~4 min"  # [~2 min, ~4 min, ~6 min]
+TONE_OPTIONS = ["Aleatório", "Aventura", "Engraçada", "Calma", "Misteriosa"]
+DURATION_OPTIONS = ["~2 min", "~4 min", "~6 min"]
 
 # Layout / Cores
 BG_HEX = "#020617"       # fundo
@@ -72,6 +77,20 @@ def inject_css():
         background: #0f172a; color: #e5e7eb;
       }}
       code {{ color:#e5e7eb; }}
+      .copy-btn {{
+        margin-top: 12px;
+        width: 100%;
+        background: transparent;
+        border: 1px solid {BTN_HEX};
+        color: {BTN_HEX};
+        border-radius: 12px;
+        padding: .75rem 1rem;
+        font-weight: 600;
+        cursor: pointer;
+      }}
+      .copy-btn:hover {{
+        background: rgba(79, 70, 229, 0.15);
+      }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -185,6 +204,10 @@ def main():
     if "confirm_stop" not in st.session_state: st.session_state["confirm_stop"] = False
     if "stop" not in st.session_state: st.session_state["stop"] = False
     if "trigger_generation" not in st.session_state: st.session_state["trigger_generation"] = False
+    if "generated_story" not in st.session_state: st.session_state["generated_story"] = None
+    if "personalize_idea" not in st.session_state: st.session_state["personalize_idea"] = ""
+    if "personalize_tone" not in st.session_state: st.session_state["personalize_tone"] = DEFAULT_TONE
+    if "personalize_duration" not in st.session_state: st.session_state["personalize_duration"] = DEFAULT_DURATION
 
     configure_gemini()
     prompts = load_prompts()
@@ -194,28 +217,29 @@ def main():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         expand = st.toggle("Personalizar", value=False, disabled=st.session_state["busy"])
 
-        idea = ""
-        tone = DEFAULT_TONE
-        duration = DEFAULT_DURATION
-        gen_image = True
-
         if expand:
-            idea = st.text_input(
+            st.text_input(
                 "Ideia principal (opcional)",
                 placeholder="ex.: 'um coelho que quer voar'",
-                disabled=st.session_state["busy"]
+                disabled=st.session_state["busy"],
+                key="personalize_idea"
             )
-            tone = st.selectbox(
-                "Tom", ["Aleatório", "Aventura", "Engraçada", "Calma", "Misteriosa"],
-                index=0, disabled=st.session_state["busy"]
+            st.selectbox(
+                "Tom",
+                TONE_OPTIONS,
+                index=TONE_OPTIONS.index(st.session_state["personalize_tone"])
+                if st.session_state["personalize_tone"] in TONE_OPTIONS else 0,
+                disabled=st.session_state["busy"],
+                key="personalize_tone"
             )
-            duration = st.selectbox(
-                "Duração", ["~2 min", "~4 min", "~6 min"],
-                index=1, disabled=st.session_state["busy"]
+            st.selectbox(
+                "Duração",
+                DURATION_OPTIONS,
+                index=DURATION_OPTIONS.index(st.session_state["personalize_duration"])
+                if st.session_state["personalize_duration"] in DURATION_OPTIONS else 1,
+                disabled=st.session_state["busy"],
+                key="personalize_duration"
             )
-            gen_image = st.checkbox("Gerar Ilustração", value=True, disabled=st.session_state["busy"])
-        else:
-            gen_image = True  # habilitado por padrão
 
         # Botão principal / Interromper
         if not st.session_state["busy"]:
@@ -226,11 +250,19 @@ def main():
                 on_click=start_generation_callback,
             )
         else:
-            stop_clicked = st.button("Interromper geração", use_container_width=True)
+            stop_clicked = st.button("Interromper Geração", use_container_width=True)
             if stop_clicked:
                 st.session_state["confirm_stop"] = True
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+    idea_value = st.session_state.get("personalize_idea", "")
+    tone_value = st.session_state.get("personalize_tone", DEFAULT_TONE)
+    duration_value = st.session_state.get("personalize_duration", DEFAULT_DURATION)
+    if tone_value not in TONE_OPTIONS:
+        tone_value = DEFAULT_TONE
+    if duration_value not in DURATION_OPTIONS:
+        duration_value = DEFAULT_DURATION
 
     # Modal de confirmação para interromper
     if st.session_state["confirm_stop"]:
@@ -244,22 +276,18 @@ def main():
             if st.button("Não, continuar", use_container_width=True):
                 st.session_state["confirm_stop"] = False
 
-    # Área de resultado
-    placeholder_story = st.empty()
-    placeholder_image = st.empty()
-
     # --- Fluxo de geração ---
     if st.session_state.get("trigger_generation"):
         st.session_state["trigger_generation"] = False
         with st.spinner("Gerando..."):
             _maybe_stop()
-            guard = validate_user_idea(idea, prompts)
+            guard = validate_user_idea(idea_value, prompts)
             _maybe_stop()
-            effective_idea = "" if guard["decision"] != "USE_AS_IS" else idea
+            effective_idea = "" if guard["decision"] != "USE_AS_IS" else idea_value
             if guard["decision"] != "USE_AS_IS":
                 st.toast("Ideia personalizada não pôde ser usada; gerando história segura automaticamente.", icon="ℹ️")
 
-            user_prompt = build_user_prompt(effective_idea, tone, duration)
+            user_prompt = build_user_prompt(effective_idea, tone_value, duration_value)
             story_raw = generate_story(user_prompt, prompts)
             _maybe_stop()
 
@@ -282,34 +310,76 @@ def main():
                     body_html = "&nbsp;"
                 moral_html = html.escape(moral_line) if moral_line else ""
 
-                placeholder_story.markdown(
-                    f"""
-                    <div class='card'>
-                      <div class='story-title'>{title_text}</div>
-                      <div class='story-text'>{body_html}</div>
-                      {f"<div class='story-moral'>{moral_html}</div>" if moral_html else ""}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                st.session_state["generated_story"] = {
+                    "title": title_text,
+                    "body_html": body_html,
+                    "moral_html": moral_html,
+                    "raw_text": story,
+                }
             else:
-                placeholder_story.error("Não foi possível gerar a história.")
+                st.session_state["generated_story"] = None
+                st.error("Não foi possível gerar a história.")
                 st.session_state["busy"] = False
                 st.stop()
 
-            if gen_image and story:
-                try:
-                    img_prompt = summarize_for_image_prompt(story, prompts)
-                    _maybe_stop()
-                    png_bytes = generate_story_image(img_prompt)
-                    _maybe_stop()
-                    placeholder_image.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-                    placeholder_image.image(png_bytes, use_column_width=True)
-                except Exception as e:
-                    placeholder_image.warning(f"Ilustração desativada ou não disponível: {e}")
-
         st.session_state["busy"] = False
         st.toast("Concluído", icon="✅")
+        st.experimental_rerun()
+
+    story_data = st.session_state.get("generated_story")
+    if story_data:
+        st.markdown(
+            f"""
+            <div class='card'>
+              <div class='story-title'>{story_data["title"]}</div>
+              <div class='story-text'>{story_data["body_html"]}</div>
+              {f"<div class='story-moral'>{story_data['moral_html']}</div>" if story_data["moral_html"] else ""}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        copy_payload = json.dumps(story_data["raw_text"])
+        components.html(
+            f"""
+            <div style=\"width:100%;\">
+              <style>
+                #copy-story-btn {{
+                  margin-top: 12px;
+                  width: 100%;
+                  background: transparent;
+                  border: 1px solid {BTN_HEX};
+                  color: {BTN_HEX};
+                  border-radius: 12px;
+                  padding: .75rem 1rem;
+                  font-weight: 600;
+                  cursor: pointer;
+                }}
+                #copy-story-btn:hover {{
+                  background: rgba(79, 70, 229, 0.15);
+                }}
+              </style>
+              <button id=\"copy-story-btn\">Copiar História</button>
+            </div>
+            <script>
+              const btn = document.getElementById('copy-story-btn');
+              if (btn) {{
+                btn.addEventListener('click', async () => {{
+                  const original = btn.innerText;
+                  try {{
+                    await navigator.clipboard.writeText({copy_payload});
+                    btn.innerText = 'Copiado!';
+                    setTimeout(() => btn.innerText = original, 2000);
+                  }} catch (err) {{
+                    btn.innerText = 'Falha ao copiar';
+                    setTimeout(() => btn.innerText = original, 2000);
+                  }}
+                }});
+              }}
+            </script>
+            """,
+            height=110,
+        )
 
     # --- Rodapé “pague um café” + versão ---
     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
