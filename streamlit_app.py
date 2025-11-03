@@ -1,6 +1,8 @@
 import os
 import json
 import base64
+import html
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -8,7 +10,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 # ---------- Versão ----------
-VERSION = "v1.1.0 (2025-11-03)"
+VERSION = "v1.1.1 (2025-11-03)"
 
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
@@ -98,10 +100,12 @@ def build_user_prompt(idea: str, tone: str, duration: str) -> str:
     tone_pt = tone if tone != "Aleatório" else \
         "aleatório (deixe o modelo escolher: aventura, engraçada, calma ou misteriosa)"
     lines = [
-        f"Ideia principal do usuário: {idea.strip() or '(não especificada; crie uma história original e positiva)'}",
-        f"Tom: {tone_pt}.",
-        f"Duração alvo: cerca de {target} palavras.",
-        "Formato: título, parágrafos curtos, moral destacada ao final.",
+        "Siga fielmente as preferências abaixo ao escrever a história:",
+        f"- Ideia principal: {idea.strip() or '(não especificada; crie uma história original e positiva)'}",
+        f"- Tom desejado: {tone_pt}.",
+        f"- Comprimento aproximado: {target} palavras.",
+        "- Estrutura: título, parágrafos curtos, moral destacada ao final.",
+        "Regras adicionais: escreva em português do Brasil, sem usar marcações de Markdown (não use #, **, _ ou listas).",
     ]
     return "\n".join(lines)
 
@@ -112,6 +116,21 @@ def generate_story(user_prompt: str, prompts: dict) -> str:
     )
     resp = model.generate_content(user_prompt)
     return resp.text
+
+
+def clean_story_markdown(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.replace("\r\n", "\n")
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "")
+    cleaned = re.sub(r"_([^_]+)_", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"^#+\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^>+\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*]\s+", "", cleaned, flags=re.MULTILINE)
+    return cleaned.strip()
 
 def summarize_for_image_prompt(story_text: str, prompts: dict) -> str:
     model = genai.GenerativeModel(
@@ -144,20 +163,28 @@ def _maybe_stop():
     if st.session_state.get("stop"):
         st.session_state["busy"] = False
         st.session_state["stop"] = False
+        st.session_state["trigger_generation"] = False
         st.toast("Geração interrompida.", icon="🛑")
         st.stop()
+
+
+def start_generation_callback():
+    st.session_state["busy"] = True
+    st.session_state["stop"] = False
+    st.session_state["confirm_stop"] = False
+    st.session_state["trigger_generation"] = True
 
 # ---------- App ----------
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="📖", layout="centered")
     inject_css()
     st.markdown(f"<h1 style='text-align:center'>{APP_TITLE}</h1>", unsafe_allow_html=True)
-    st.markdown(f"<div class='muted' style='text-align:center;margin-top:-6px;'>Versão {VERSION}</div>", unsafe_allow_html=True)
 
     # Estado
     if "busy" not in st.session_state: st.session_state["busy"] = False
     if "confirm_stop" not in st.session_state: st.session_state["confirm_stop"] = False
     if "stop" not in st.session_state: st.session_state["stop"] = False
+    if "trigger_generation" not in st.session_state: st.session_state["trigger_generation"] = False
 
     configure_gemini()
     prompts = load_prompts()
@@ -192,9 +219,13 @@ def main():
 
         # Botão principal / Interromper
         if not st.session_state["busy"]:
-            clicked = st.button("Gerar História", use_container_width=True, type="primary")
+            st.button(
+                "Gerar História",
+                use_container_width=True,
+                type="primary",
+                on_click=start_generation_callback,
+            )
         else:
-            clicked = False
             stop_clicked = st.button("Interromper geração", use_container_width=True)
             if stop_clicked:
                 st.session_state["confirm_stop"] = True
@@ -218,25 +249,45 @@ def main():
     placeholder_image = st.empty()
 
     # --- Fluxo de geração ---
-    if clicked:
-        st.session_state["busy"] = True
-        st.session_state["stop"] = False
+    if st.session_state.get("trigger_generation"):
+        st.session_state["trigger_generation"] = False
         with st.spinner("Gerando..."):
             _maybe_stop()
             guard = validate_user_idea(idea, prompts)
             _maybe_stop()
             effective_idea = "" if guard["decision"] != "USE_AS_IS" else idea
+            if guard["decision"] != "USE_AS_IS":
+                st.toast("Ideia personalizada não pôde ser usada; gerando história segura automaticamente.", icon="ℹ️")
 
             user_prompt = build_user_prompt(effective_idea, tone, duration)
-            story = generate_story(user_prompt, prompts)
+            story_raw = generate_story(user_prompt, prompts)
             _maybe_stop()
 
+            story = clean_story_markdown(story_raw)
+
             if story:
+                lines = story.splitlines()
+                title_text = html.escape(lines[0].strip()) if lines else html.escape("História")
+                body_lines = []
+                moral_line = ""
+                for line in lines[1:]:
+                    stripped = line.strip()
+                    if not moral_line and stripped.lower().startswith("moral:"):
+                        moral_line = stripped
+                    else:
+                        body_lines.append(stripped)
+
+                body_html = "<br/>".join(html.escape(line) for line in body_lines)
+                if not body_html:
+                    body_html = "&nbsp;"
+                moral_html = html.escape(moral_line) if moral_line else ""
+
                 placeholder_story.markdown(
                     f"""
                     <div class='card'>
-                      <div class='story-title'>{" ".join(story.splitlines()[0:1])}</div>
-                      <div class='story-text'>{"<br/>".join(story.splitlines()[1:])}</div>
+                      <div class='story-title'>{title_text}</div>
+                      <div class='story-text'>{body_html}</div>
+                      {f"<div class='story-moral'>{moral_html}</div>" if moral_html else ""}
                     </div>
                     """,
                     unsafe_allow_html=True
