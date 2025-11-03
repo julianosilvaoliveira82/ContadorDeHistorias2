@@ -1,25 +1,22 @@
 import os
 import json
-import time
 import base64
 from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
-
-# --- Google AI Studio (Gemini) ---
 import google.generativeai as genai
 
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
-DEFAULT_TONE = "Aleatório"  # [Aleatório, Aventura, Engraçada, Calma, Misteriosa]
+
+DEFAULT_TONE = "Aleatório"   # [Aleatório, Aventura, Engraçada, Calma, Misteriosa]
 DEFAULT_DURATION = "~4 min"  # [~2 min, ~4 min, ~6 min]
 
-# Layout constants
+# Layout / Cores
 BG_HEX = "#020617"       # fundo
 CARD_HEX = "#111827"     # cards
 BTN_HEX = "#4F46E5"      # botões (indigo-600)
-TEXT_HEX = "#e5e7eb"     # slate-200/300
 MORAL_HEX = "#818cf8"    # indigo-400
 
 # ---------- Helpers ----------
@@ -42,7 +39,6 @@ def configure_gemini():
         st.stop()
     genai.configure(api_key=api_key)
 
-# UI CSS to match screenshots
 def inject_css():
     st.markdown(f"""
     <style>
@@ -70,19 +66,15 @@ def inject_css():
       .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] input {{
         background: #0f172a; color: #e5e7eb;
       }}
+      code {{ color:#e5e7eb; }}
     </style>
     """, unsafe_allow_html=True)
 
 # ---------- AI calls ----------
 def validate_user_idea(idea: str, prompts: dict) -> dict:
-    """
-    Returns dict like:
-      {"decision": "USE_AS_IS" | "SANITIZE" | "IGNORE", "notes": "..."}
-    Any non-USE_AS_IS will be treated as IGNORE (no personalization).
-    """
+    """Guardrails via LLM -> retorna decisão JSON. SANITIZE/IGNORE => não personaliza."""
     if not idea.strip():
-        return {"decision": "USE_AS_IS", "notes": "Empty -> proceed with defaults (no personalization provided)."}
-
+        return {"decision": "USE_AS_IS", "notes": "Sem personalização informada."}
     model = genai.GenerativeModel(
         model_name="gemini-2.0-flash",
         system_instruction=prompts["guardrails"]
@@ -91,24 +83,22 @@ def validate_user_idea(idea: str, prompts: dict) -> dict:
     text = resp.text or "{}"
     try:
         data = json.loads(text)
-        # normalize
         decision = str(data.get("decision", "")).upper().strip()
         if decision not in {"USE_AS_IS", "SANITIZE", "IGNORE"}:
             decision = "IGNORE"
         return {"decision": decision, "notes": data.get("notes", "")}
     except Exception:
-        # If parser fails, be conservative
-        return {"decision": "IGNORE", "notes": "Unparseable guardrails response"}
+        return {"decision": "IGNORE", "notes": "Resposta do guardrails não parseável."}
 
 def build_user_prompt(idea: str, tone: str, duration: str) -> str:
-    # Map duration to target words
     target = {"~2 min": 320, "~4 min": 460, "~6 min": 700}.get(duration, 460)
-    tone_pt = tone if tone != "Aleatório" else "aleatório (deixe o modelo escolher entre aventura, engraçada, calma ou misteriosa)"
+    tone_pt = tone if tone != "Aleatório" else \
+        "aleatório (deixe o modelo escolher: aventura, engraçada, calma ou misteriosa)"
     lines = [
         f"Ideia principal do usuário: {idea.strip() or '(não especificada; crie uma história original e positiva)'}",
         f"Tom: {tone_pt}.",
         f"Duração alvo: cerca de {target} palavras.",
-        "Formato: título, parágrafos curtos, moral destacada no final.",
+        "Formato: título, parágrafos curtos, moral destacada ao final.",
     ]
     return "\n".join(lines)
 
@@ -130,73 +120,115 @@ def summarize_for_image_prompt(story_text: str, prompts: dict) -> str:
 
 def generate_story_image(img_prompt_en: str) -> bytes:
     """
-    Uses Imagen 3.0 to generate a PNG from a short English prompt.
-    Returns raw PNG bytes.
+    Gera PNG usando o modelo de imagem solicitado: 'models/gemini-2.5-flash-image'.
     """
-    # Some SDKs expose this via genai.ImageGenerationModel; here we use the generic client
-    # If your installed SDK version differs, check README for alternatives.
-    image_model = genai.GenerativeModel("imagen-3.0-generate-001")
-    img = image_model.generate_content(img_prompt_en, generation_config={"response_mime_type": "image/png"})
-    # SDK returns a blob-like part; handle typical patterns:
-    if hasattr(img, "binary") and img.binary:
-        return img.binary
-    # Fallback: find first image in parts
-    for p in getattr(img, "parts", []):
+    image_model = genai.GenerativeModel("models/gemini-2.5-flash-image")
+    resp = image_model.generate_content(
+        img_prompt_en,
+        generation_config={"response_mime_type": "image/png"}
+    )
+    # Tenta extrair os bytes de imagem das variantes comuns do SDK
+    if hasattr(resp, "binary") and resp.binary:
+        return resp.binary
+    for p in getattr(resp, "parts", []):
         if getattr(p, "mime_type", "") == "image/png" and getattr(p, "data", None):
             return p.data
-    raise RuntimeError("Imagem não retornada pela API.")
+        if isinstance(getattr(p, "text", None), str) and p.text.startswith("data:image/png;base64,"):
+            return base64.b64decode(p.text.split(",", 1)[1])
+    raise RuntimeError("Imagem não retornada pelo modelo de imagem.")
 
-# ---------- Streamlit App ----------
+# ---------- Cancelamento cooperativo ----------
+def _maybe_stop():
+    if st.session_state.get("stop"):
+        st.session_state["busy"] = False
+        st.session_state["stop"] = False
+        st.toast("Geração interrompida.", icon="🛑")
+        st.stop()
+
+# ---------- App ----------
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="📖", layout="centered")
     inject_css()
     st.markdown(f"<h1 style='text-align:center'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 
+    # Estado
+    if "busy" not in st.session_state: st.session_state["busy"] = False
+    if "confirm_stop" not in st.session_state: st.session_state["confirm_stop"] = False
+    if "stop" not in st.session_state: st.session_state["stop"] = False
+
     configure_gemini()
     prompts = load_prompts()
 
-    # Card de Personalização (inicia colapsado)
+    # --- Card de Personalização (colapsado por padrão) ---
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        expand = st.toggle("Personalizar", value=False)
+        expand = st.toggle("Personalizar", value=False, disabled=st.session_state["busy"])
+
         idea = ""
         tone = DEFAULT_TONE
         duration = DEFAULT_DURATION
         gen_image = True
 
         if expand:
-            idea = st.text_input("Ideia principal (opcional)", placeholder="ex.: 'um coelho que quer voar'")
-            tone = st.selectbox("Tom", ["Aleatório", "Aventura", "Engraçada", "Calma", "Misteriosa"], index=0)
-            duration = st.selectbox("Duração", ["~2 min", "~4 min", "~6 min"], index=1)
-            gen_image = st.checkbox("Gerar Ilustração", value=True)
+            idea = st.text_input(
+                "Ideia principal (opcional)",
+                placeholder="ex.: 'um coelho que quer voar'",
+                disabled=st.session_state["busy"]
+            )
+            tone = st.selectbox(
+                "Tom", ["Aleatório", "Aventura", "Engraçada", "Calma", "Misteriosa"],
+                index=0, disabled=st.session_state["busy"]
+            )
+            duration = st.selectbox(
+                "Duração", ["~2 min", "~4 min", "~6 min"],
+                index=1, disabled=st.session_state["busy"]
+            )
+            gen_image = st.checkbox("Gerar Ilustração", value=True, disabled=st.session_state["busy"])
         else:
             gen_image = True  # habilitado por padrão
 
-        col = st.columns([1])[0]
-        generate = st.button("Gerar História", use_container_width=True, type="primary")
+        # Botão principal / Interromper
+        if not st.session_state["busy"]:
+            clicked = st.button("Gerar História", use_container_width=True, type="primary")
+        else:
+            clicked = False
+            stop_clicked = st.button("Interromper geração", use_container_width=True)
+            if stop_clicked:
+                st.session_state["confirm_stop"] = True
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # Modal de confirmação para interromper
+    if st.session_state["confirm_stop"]:
+        st.warning("Interromper a geração? Esta ação cancela o processo atual.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Sim, interromper agora", use_container_width=True):
+                st.session_state["stop"] = True
+                st.session_state["confirm_stop"] = False
+        with col2:
+            if st.button("Não, continuar", use_container_width=True):
+                st.session_state["confirm_stop"] = False
 
     # Área de resultado
     placeholder_story = st.empty()
     placeholder_image = st.empty()
 
-    if generate:
+    # --- Fluxo de geração ---
+    if clicked:
+        st.session_state["busy"] = True
+        st.session_state["stop"] = False
         with st.spinner("Gerando..."):
-            # 1) Guardrails
+            _maybe_stop()
             guard = validate_user_idea(idea, prompts)
-            if guard["decision"] != "USE_AS_IS":
-                effective_idea = ""  # descarta personalização para máxima segurança
-            else:
-                effective_idea = idea
+            _maybe_stop()
+            effective_idea = "" if guard["decision"] != "USE_AS_IS" else idea
 
-            # 2) Build prompt & gerar história
             user_prompt = build_user_prompt(effective_idea, tone, duration)
             story = generate_story(user_prompt, prompts)
+            _maybe_stop()
 
-            # Render história
             if story:
-                # título (primeira linha até quebra dupla) – fallback simples
                 placeholder_story.markdown(
                     f"""
                     <div class='card'>
@@ -208,18 +240,35 @@ def main():
                 )
             else:
                 placeholder_story.error("Não foi possível gerar a história.")
+                st.session_state["busy"] = False
+                st.stop()
 
-            # 3) Imagem (opcional)
             if gen_image and story:
                 try:
                     img_prompt = summarize_for_image_prompt(story, prompts)
+                    _maybe_stop()
                     png_bytes = generate_story_image(img_prompt)
+                    _maybe_stop()
                     placeholder_image.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-                    placeholder_image.image(png_bytes, caption=None, use_column_width=True)
+                    placeholder_image.image(png_bytes, use_column_width=True)
                 except Exception as e:
                     placeholder_image.warning(f"Ilustração desativada ou não disponível: {e}")
 
-            st.toast("Concluído", icon="✅")
+        st.session_state["busy"] = False
+        st.toast("Concluído", icon="✅")
+
+    # --- Rodapé “pague um café” ---
+    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown(f"""
+        <div class='card'>
+          <div class='story-text'>
+            <b>Curtiu o app?</b> Se este projeto te ajudou, considere pagar um café ☕.<br/>
+            <span class='muted'>PIX (chave e-mail):</span><br/>
+            <code>juliano.silva.oliveira@gmai.com</code>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
