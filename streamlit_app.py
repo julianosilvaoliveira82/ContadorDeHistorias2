@@ -127,7 +127,7 @@ def generate_story_image(img_prompt_en: str) -> bytes:
         img_prompt_en,
         generation_config={"response_mime_type": "image/png"}
     )
-    # Tenta extrair os bytes de imagem das variantes comuns do SDK
+    # Extrai bytes da resposta
     if hasattr(resp, "binary") and resp.binary:
         return resp.binary
     for p in getattr(resp, "parts", []):
