@@ -14,3 +14,7 @@ App de histórias infantis com guardrails + geração de ilustração opcional.
 - Em **Secrets** do app, adicione:
   ```toml
   GOOGLE_API_KEY = "sua_chave"
+## Mudanças recentes
+- Botão **Interromper geração** com confirmação e **cancelamento cooperativo** (bloqueia os controles de Personalizar enquanto gera).
+- Modelo de imagem atualizado para **`models/gemini-2.5-flash-image`**.
+- Rodapé opcional “pague um café” com chave PIX.
