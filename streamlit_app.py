@@ -11,7 +11,9 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 # ---------- Versão ----------
+
 VERSION = "v1.1.2 (2025-11-03)"
+
 
 # ---------- Config ----------
 APP_TITLE = "Contador de Histórias"
